@@ -1,11 +1,15 @@
 {
   "name": "ax-frontend",
-  "version": "1.0.0",
+  "version": "1.0.1",
+  "description": "AX AI frontend - Vercel deploy fix",
   "private": true,
   "proxy": "http://localhost:5000",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "node ./node_modules/vite/bin/vite.js build",
     "preview": "vite preview"
   },
   "dependencies": {
