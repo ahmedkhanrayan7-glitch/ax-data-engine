@@ -1185,13 +1185,14 @@ app.post("/api/search", async (req, res) => {
   try {
     // ── 1. Primary: Google Places API ────────────────────────────────
     const placesLeads = await searchGooglePlaces(niche, location);
+    console.log(`  [DEBUG] Places API returned: ${placesLeads.length} leads`);
 
     // ── 2. Secondary: scraping sources (always run, merged in) ───────
     let scrapeLeads = [];
     const deficit = 80 - placesLeads.length;
     if (deficit > 0) {
       scrapeLeads = await scrapingDiscovery(niche, location);
-      console.log(`  Scraping added: ${scrapeLeads.length}`);
+      console.log(`  [DEBUG] Scraping returned: ${scrapeLeads.length} leads`);
     }
 
     // ── 3. Merge live results, dedup by name ─────────────────────────
@@ -1203,12 +1204,13 @@ app.post("/api/search", async (req, res) => {
       return true;
     });
     const liveAll = [...placesLeads, ...uniqueScrape];
+    console.log(`  [DEBUG] Live results after merge: ${liveAll.length}`);
 
     // ── 4. Pad with seeds to guarantee 80 phone-bearing candidates ───
     const seeds     = getSeedLeads(niche);
     const padded    = seeds.filter((s) => !liveNames.has(s.name.toLowerCase().replace(/\s+/g, "")));
     const candidates = [...liveAll, ...padded].slice(0, 80);
-    console.log(`  Candidates going into enrichment: ${candidates.length}`);
+    console.log(`  [DEBUG] Candidates (live + seeds): ${candidates.length} (seeds added: ${padded.length})`);
 
     // ── 5. Normalize non-Latin names (single batch API call) ────────
     await batchNormalizeNames(candidates);
@@ -1218,14 +1220,27 @@ app.post("/api/search", async (req, res) => {
       candidates.map((b) => enrichLead(b, niche))
     );
 
-    const allLeads = settled
-      .filter((r) => r.status === "fulfilled")
-      .map((r) => r.value)
-      .sort((a, b) => b.lead_score - a.lead_score);
+    const fulfilled = settled.filter((r) => r.status === "fulfilled").map((r) => r.value);
+    const rejected  = settled.filter((r) => r.status === "rejected");
+    console.log(`  [DEBUG] Enrichment: ${fulfilled.length} ok, ${rejected.length} failed`);
+    if (rejected.length > 0) {
+      console.log(`  [DEBUG] Sample rejection: ${rejected[0].reason?.message || rejected[0].reason}`);
+    }
 
-    const leads = filterUsed(allLeads).slice(0, 50);
+    const allLeads = fulfilled.sort((a, b) => b.lead_score - a.lead_score);
 
-    console.log(`  Returning ${leads.length} leads (deduped)`);
+    // Dedup filter — but if it empties everything, skip it
+    let leads = filterUsed(allLeads).slice(0, 50);
+    console.log(`  [DEBUG] After dedup filter: ${leads.length} (cache size: ${usedLeads.size})`);
+
+    // SAFETY: if dedup removed everything, clear cache and return unfiltered
+    if (leads.length === 0 && allLeads.length > 0) {
+      console.log("  [DEBUG] Dedup emptied results — clearing cache and returning unfiltered");
+      usedLeads.clear();
+      leads = allLeads.slice(0, 50);
+    }
+
+    console.log(`  Returning ${leads.length} leads`);
 
     // Save to user's own Google Sheet (only if connected, never blocks results)
     let savedToSheets = false;
@@ -1238,7 +1253,8 @@ app.post("/api/search", async (req, res) => {
 
   } catch (err) {
     console.error("  Pipeline failed:", err.message);
-    // Hard fallback — return enriched seeds so response is never empty
+    console.error("  Stack:", err.stack);
+    // Hard fallback — return enriched seeds so response is NEVER empty
     const seeds = getSeedLeads(niche).map((b) => {
       const normalized = needsNormalization(b.name) ? transliterateName(b.name) : b.name;
       return {
@@ -1257,6 +1273,7 @@ app.post("/api/search", async (req, res) => {
         insight: "Seed fallback — live search unavailable",
       };
     });
+    console.log(`  Fallback: returning ${Math.min(seeds.length, 50)} seed leads`);
     res.json({ leads: seeds.slice(0, 50), savedToSheets: false });
   }
 });
