@@ -3,7 +3,6 @@
   "version": "1.0.1",
   "description": "AX AI frontend - Vercel deploy fix",
   "private": true,
-  "proxy": "http://localhost:5000",
   "engines": {
     "node": ">=18"
   },

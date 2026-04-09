@@ -2,6 +2,8 @@ import { useState } from "react";
 import axios from "axios";
 import "./App.css";
 
+const API_URL = import.meta.env.VITE_API_URL || "";
+
 const SERVICES = [
   {
     id: "business_finder",
@@ -71,7 +73,7 @@ export default function App() {
     setSearched(false);
 
     try {
-      const res = await axios.post("/api/search", {
+      const res = await axios.post(`${API_URL}/api/search`, {
         service: activeService,
         niche: niche.trim(),
         location: location.trim(),
@@ -80,7 +82,7 @@ export default function App() {
       setResults(res.data);
       setSearched(true);
     } catch {
-      setError("Could not reach the server. Make sure the backend is running on port 5000.");
+      setError("Could not reach the server. Please try again later.");
     } finally {
       setLoading(false);
     }
