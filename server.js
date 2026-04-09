@@ -963,8 +963,18 @@ function buildInsight({ website, email, generatedEmails, dm, dmInferred }) {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// ROUTE
+// GLOBAL ERROR HANDLERS
 // ─────────────────────────────────────────────────────────────────
+process.on("uncaughtException", (err) => console.error("Uncaught:", err));
+process.on("unhandledRejection", (err) => console.error("Unhandled:", err));
+
+// ─────────────────────────────────────────────────────────────────
+// ROUTES
+// ─────────────────────────────────────────────────────────────────
+
+app.get("/", (req, res) => {
+  res.json({ status: "ok", service: "AX AI V Data Engine" });
+});
 
 app.post("/api/search", async (req, res) => {
   const { niche, location, service = "business_finder" } = req.body;
