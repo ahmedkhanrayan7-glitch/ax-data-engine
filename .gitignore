@@ -3,3 +3,6 @@ dist/
 .env
 .env.local
 .vite/
+frontend/node_modules/
+frontend/dist/
+frontend/package-lock.json
