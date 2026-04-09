@@ -1,4 +1,5 @@
 const express = require("express");
+const crypto  = require("crypto");
 const cors    = require("cors");
 const axios   = require("axios");
 const cheerio = require("cheerio");
@@ -8,7 +9,12 @@ const path    = require("path");
 const app  = express();
 const PORT = process.env.PORT || 5000;
 
-app.use(cors());
+const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
+
+app.use(cors({
+  origin: [FRONTEND_URL, "http://localhost:3000", "http://localhost:5173"],
+  credentials: true,
+}));
 app.use(express.json());
 
 // ─────────────────────────────────────────────────────────────────
@@ -38,23 +44,69 @@ app.use(express.json());
 const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY || null;
 
 // ─────────────────────────────────────────────────────────────────
-// GOOGLE SHEETS INTEGRATION
+// GOOGLE OAUTH + PER-USER SHEETS
 // ─────────────────────────────────────────────────────────────────
 const { google } = require("googleapis");
 
-async function saveToSheets(leads) {
-  const sheetId     = process.env.GOOGLE_SHEET_ID;
-  const clientEmail = process.env.GOOGLE_CLIENT_EMAIL;
-  const rawKey      = process.env.GOOGLE_PRIVATE_KEY;
-  if (!sheetId || !clientEmail || !rawKey) {
-    console.log("  Sheets: skipped (env vars not set)");
-    return;
+const GOOGLE_CLIENT_ID     = process.env.GOOGLE_CLIENT_ID;
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+const BACKEND_URL          = process.env.BACKEND_URL || `http://localhost:${PORT}`;
+
+// In-memory session store  { sessionId: { tokens, sheetId, email } }
+const sessions = new Map();
+
+function getSession(req) {
+  const sid = req.headers["x-session-id"];
+  return sid ? sessions.get(sid) : null;
+}
+
+function createOAuth2Client(tokens) {
+  const client = new google.auth.OAuth2(
+    GOOGLE_CLIENT_ID,
+    GOOGLE_CLIENT_SECRET,
+    `${BACKEND_URL}/auth/google/callback`
+  );
+  if (tokens) client.setCredentials(tokens);
+  return client;
+}
+
+// Create a new "AX AI Leads" sheet for the user
+async function createUserSheet(auth) {
+  const sheets = google.sheets({ version: "v4", auth });
+  const resp = await sheets.spreadsheets.create({
+    requestBody: {
+      properties: { title: "AX AI Leads" },
+      sheets: [{
+        properties: { title: "Leads" },
+      }],
+    },
+  });
+  const sheetId = resp.data.spreadsheetId;
+  // Add header row
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: sheetId,
+    range: "Leads!A1:G1",
+    valueInputOption: "RAW",
+    requestBody: {
+      values: [["Name", "Website", "Email", "Phone", "Decision Maker", "Score", "Timestamp"]],
+    },
+  });
+  console.log(`  Sheets: created user sheet ${sheetId}`);
+  return sheetId;
+}
+
+// Save leads to the user's own sheet
+async function saveToUserSheet(session, leads) {
+  if (!session || !session.tokens) {
+    console.log("  Sheets: skipped (user not connected)");
+    return false;
   }
   try {
-    const privateKey = rawKey.replace(/\\n/g, "\n");
-    const auth = new google.auth.JWT(clientEmail, null, privateKey, [
-      "https://www.googleapis.com/auth/spreadsheets",
-    ]);
+    const auth = createOAuth2Client(session.tokens);
+    // Create sheet on first save
+    if (!session.sheetId) {
+      session.sheetId = await createUserSheet(auth);
+    }
     const sheets = google.sheets({ version: "v4", auth });
     const rows = leads.map((l) => [
       l.company        || "",
@@ -66,14 +118,16 @@ async function saveToSheets(leads) {
       new Date().toISOString(),
     ]);
     await sheets.spreadsheets.values.append({
-      spreadsheetId: sheetId,
-      range: "Sheet1!A:G",
+      spreadsheetId: session.sheetId,
+      range: "Leads!A:G",
       valueInputOption: "RAW",
       requestBody: { values: rows },
     });
-    console.log(`  Sheets: saved ${rows.length} leads`);
+    console.log(`  Sheets: saved ${rows.length} leads to user sheet`);
+    return true;
   } catch (err) {
     console.error("  Sheets error (non-fatal):", err.message);
+    return false;
   }
 }
 
@@ -1036,6 +1090,67 @@ app.get("/", (req, res) => {
   res.json({ status: "ok", service: "AX AI V Data Engine" });
 });
 
+// ── Google OAuth routes ──────────────────────────────────────────
+
+app.get("/auth/google", (req, res) => {
+  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
+    return res.status(500).json({ error: "Google OAuth not configured" });
+  }
+  const client = createOAuth2Client();
+  const url = client.generateAuthUrl({
+    access_type: "offline",
+    prompt: "consent",
+    scope: [
+      "https://www.googleapis.com/auth/spreadsheets",
+      "https://www.googleapis.com/auth/drive.file",
+      "https://www.googleapis.com/auth/userinfo.email",
+    ],
+    state: req.query.session_id || "",
+  });
+  res.redirect(url);
+});
+
+app.get("/auth/google/callback", async (req, res) => {
+  try {
+    const client = createOAuth2Client();
+    const { tokens } = await client.getToken(req.query.code);
+    client.setCredentials(tokens);
+
+    // Get user email
+    const oauth2 = google.oauth2({ version: "v2", auth: client });
+    const userInfo = await oauth2.userinfo.get();
+    const email = userInfo.data.email;
+
+    // Store in session
+    const sessionId = req.query.state || crypto.randomUUID();
+    sessions.set(sessionId, { tokens, sheetId: null, email });
+    console.log(`  OAuth: connected ${email} (session ${sessionId})`);
+
+    // Redirect back to frontend with session
+    res.redirect(`${FRONTEND_URL}?google_connected=true&session_id=${sessionId}`);
+  } catch (err) {
+    console.error("  OAuth callback error:", err.message);
+    res.redirect(`${FRONTEND_URL}?google_connected=false&error=auth_failed`);
+  }
+});
+
+app.get("/auth/status", (req, res) => {
+  const session = getSession(req);
+  if (session) {
+    res.json({ connected: true, email: session.email });
+  } else {
+    res.json({ connected: false });
+  }
+});
+
+app.post("/auth/disconnect", (req, res) => {
+  const sid = req.headers["x-session-id"];
+  if (sid) sessions.delete(sid);
+  res.json({ disconnected: true });
+});
+
+// ── Search route ─────────────────────────────────────────────────
+
 app.post("/api/search", async (req, res) => {
   const { niche, location, service = "business_finder" } = req.body;
 
@@ -1090,8 +1205,15 @@ app.post("/api/search", async (req, res) => {
     const leads = filterUsed(allLeads).slice(0, 50);
 
     console.log(`  Returning ${leads.length} leads (deduped)`);
-    saveToSheets(leads).catch(() => {});
-    res.json(leads);
+
+    // Save to user's own Google Sheet (non-blocking)
+    const session = getSession(req);
+    let savedToSheets = false;
+    if (session) {
+      savedToSheets = await saveToUserSheet(session, leads).catch(() => false);
+    }
+
+    res.json({ leads, savedToSheets });
 
   } catch (err) {
     console.error("  Pipeline failed:", err.message);
@@ -1114,7 +1236,7 @@ app.post("/api/search", async (req, res) => {
         insight: "Seed fallback — live search unavailable",
       };
     });
-    res.json(seeds.slice(0, 50));
+    res.json({ leads: seeds.slice(0, 50), savedToSheets: false });
   }
 });
 

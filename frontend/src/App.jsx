@@ -1,8 +1,12 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import axios from "axios";
 import "./App.css";
 
 const API_URL = import.meta.env.VITE_API_URL || "";
+
+function getSessionId() {
+  return localStorage.getItem("ax_session_id") || "";
+}
 
 const SERVICES = [
   {
@@ -58,6 +62,40 @@ export default function App() {
   const [error,    setError]    = useState("");
   const [searched, setSearched] = useState(false);
   const [savedMsg, setSavedMsg] = useState("");
+  const [googleUser, setGoogleUser] = useState(null); // { connected, email }
+
+  // On mount: check URL params from OAuth callback + check session status
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const connected = params.get("google_connected");
+    const sid = params.get("session_id");
+    if (connected === "true" && sid) {
+      localStorage.setItem("ax_session_id", sid);
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+    // Check auth status
+    const sessionId = getSessionId();
+    if (sessionId) {
+      axios.get(`${API_URL}/auth/status`, { headers: { "x-session-id": sessionId } })
+        .then((r) => setGoogleUser(r.data))
+        .catch(() => setGoogleUser({ connected: false }));
+    }
+  }, []);
+
+  function connectGoogle() {
+    const sessionId = getSessionId() || crypto.randomUUID();
+    localStorage.setItem("ax_session_id", sessionId);
+    window.location.href = `${API_URL}/auth/google?session_id=${sessionId}`;
+  }
+
+  function disconnectGoogle() {
+    const sessionId = getSessionId();
+    if (sessionId) {
+      axios.post(`${API_URL}/auth/disconnect`, {}, { headers: { "x-session-id": sessionId } }).catch(() => {});
+    }
+    localStorage.removeItem("ax_session_id");
+    setGoogleUser(null);
+  }
 
   function acceptConsent() {
     localStorage.setItem("user_consent", "true");
@@ -80,16 +118,25 @@ export default function App() {
     setSearched(false);
 
     try {
+      const headers = {};
+      const sid = getSessionId();
+      if (sid) headers["x-session-id"] = sid;
+
       const res = await axios.post(`${API_URL}/api/search`, {
         service: activeService,
         niche: niche.trim(),
         location: location.trim(),
         roles,
-      });
-      setResults(res.data);
+      }, { headers });
+
+      // Support both old (array) and new ({ leads, savedToSheets }) response shapes
+      const leads = Array.isArray(res.data) ? res.data : res.data.leads;
+      const saved = res.data.savedToSheets || false;
+
+      setResults(leads);
       setSearched(true);
-      if (res.data.length > 0) {
-        setSavedMsg("Leads saved to Google Sheets");
+      if (leads.length > 0 && saved) {
+        setSavedMsg("Leads saved to your Google Sheets");
         setTimeout(() => setSavedMsg(""), 4000);
       }
     } catch {
@@ -131,7 +178,20 @@ export default function App() {
             <span className="brand-mark">▲</span>
             <span className="brand-name">AX <span className="brand-accent">AI V</span> Data Engine</span>
           </div>
-          <span className="header-tag">Lead Intelligence Platform</span>
+          <div className="header-right">
+            {googleUser?.connected ? (
+              <div className="google-status">
+                <span className="google-dot" />
+                <span className="google-email">{googleUser.email}</span>
+                <button className="google-disconnect" onClick={disconnectGoogle}>Disconnect</button>
+              </div>
+            ) : (
+              <button className="google-connect-btn" onClick={connectGoogle}>
+                Connect Google Sheets
+              </button>
+            )}
+            <span className="header-tag">Lead Intelligence Platform</span>
+          </div>
         </div>
       </header>
 
