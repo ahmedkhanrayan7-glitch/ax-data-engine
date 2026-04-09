@@ -9,11 +9,11 @@ const path    = require("path");
 const app  = express();
 const PORT = process.env.PORT || 5000;
 
-const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
+const FRONTEND_URL = process.env.FRONTEND_URL || "https://ax-data-engine-1dic.vercel.app";
 
 // ── CORS — allow frontend origin with credentials (cookies) ─────
 app.use(cors({
-  origin: [FRONTEND_URL, "http://localhost:3000", "http://localhost:5173"],
+  origin: [FRONTEND_URL, "https://ax-data-engine-1dic.vercel.app", "http://localhost:3000", "http://localhost:5173"],
   credentials: true,
 }));
 app.use(express.json());
@@ -67,16 +67,19 @@ const { google } = require("googleapis");
 
 const GOOGLE_CLIENT_ID     = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
-const BACKEND_URL          = process.env.BACKEND_URL || `http://localhost:${PORT}`;
+
+// Redirect URI must EXACTLY match what's registered in Google Cloud Console
+const OAUTH_REDIRECT_URI = "https://ax-data-engine.onrender.com/auth/google/callback";
 
 // Helper: build an OAuth2 client, optionally seeded with tokens
 function createOAuth2Client(tokens) {
   const client = new google.auth.OAuth2(
     GOOGLE_CLIENT_ID,
     GOOGLE_CLIENT_SECRET,
-    `${BACKEND_URL}/auth/google/callback`
+    OAUTH_REDIRECT_URI
   );
   if (tokens) client.setCredentials(tokens);
+  console.log("  OAuth redirect URI:", client.redirectUri);
   return client;
 }
 
