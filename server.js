@@ -1178,7 +1178,9 @@ app.post("/api/search", async (req, res) => {
   }
 
   const hasKey = !!GOOGLE_API_KEY;
-  console.log(`\n[${service}] "${niche}" in "${location}" | Places API: ${hasKey ? "YES" : "NO KEY"}`);
+  const hasTokens = !!(req.session && req.session.tokens);
+  console.log(`\n[${service}] "${niche}" in "${location}" | Places API: ${hasKey ? "YES" : "NO KEY"} | Google session: ${hasTokens ? req.session.email : "none"}`);
+  if (!hasTokens) console.log("  No Google tokens — proceeding without Sheets save");
 
   try {
     // ── 1. Primary: Google Places API ────────────────────────────────
@@ -1225,10 +1227,11 @@ app.post("/api/search", async (req, res) => {
 
     console.log(`  Returning ${leads.length} leads (deduped)`);
 
-    // Save to user's own Google Sheet via express-session tokens
+    // Save to user's own Google Sheet (only if connected, never blocks results)
     let savedToSheets = false;
-    if (req.session.tokens) {
+    if (req.session && req.session.tokens) {
       savedToSheets = await saveToUserSheet(req.session, leads).catch(() => false);
+      console.log(`  Sheets save: ${savedToSheets ? "OK" : "failed (non-fatal)"}`);
     }
 
     res.json({ leads, savedToSheets });
