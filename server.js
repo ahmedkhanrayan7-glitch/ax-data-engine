@@ -1,5 +1,5 @@
 const express = require("express");
-const crypto  = require("crypto");
+const session = require("express-session");
 const cors    = require("cors");
 const axios   = require("axios");
 const cheerio = require("cheerio");
@@ -11,11 +11,28 @@ const PORT = process.env.PORT || 5000;
 
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
 
+// ── CORS — allow frontend origin with credentials (cookies) ─────
 app.use(cors({
   origin: [FRONTEND_URL, "http://localhost:3000", "http://localhost:5173"],
   credentials: true,
 }));
 app.use(express.json());
+
+// ── Session — stores Google OAuth tokens per user ────────────────
+// In production, sessions live in server memory. The cookie is
+// sent to the browser so the same session survives page reloads.
+app.set("trust proxy", 1); // trust Render's reverse proxy
+app.use(session({
+  secret: process.env.SESSION_SECRET || "ax-engine-dev-secret",
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    secure: process.env.NODE_ENV === "production",  // HTTPS only in prod
+    httpOnly: true,
+    sameSite: process.env.NODE_ENV === "production" ? "none" : "lax", // cross-site for Vercel↔Render
+    maxAge: 24 * 60 * 60 * 1000, // 24 hours
+  },
+}));
 
 // ─────────────────────────────────────────────────────────────────
 // CONFIG
@@ -52,14 +69,7 @@ const GOOGLE_CLIENT_ID     = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 const BACKEND_URL          = process.env.BACKEND_URL || `http://localhost:${PORT}`;
 
-// In-memory session store  { sessionId: { tokens, sheetId, email } }
-const sessions = new Map();
-
-function getSession(req) {
-  const sid = req.headers["x-session-id"];
-  return sid ? sessions.get(sid) : null;
-}
-
+// Helper: build an OAuth2 client, optionally seeded with tokens
 function createOAuth2Client(tokens) {
   const client = new google.auth.OAuth2(
     GOOGLE_CLIENT_ID,
@@ -96,16 +106,17 @@ async function createUserSheet(auth) {
 }
 
 // Save leads to the user's own sheet
-async function saveToUserSheet(session, leads) {
-  if (!session || !session.tokens) {
+// Uses req.session (express-session) to read tokens and persist sheetId
+async function saveToUserSheet(reqSession, leads) {
+  if (!reqSession || !reqSession.tokens) {
     console.log("  Sheets: skipped (user not connected)");
     return false;
   }
   try {
-    const auth = createOAuth2Client(session.tokens);
-    // Create sheet on first save
-    if (!session.sheetId) {
-      session.sheetId = await createUserSheet(auth);
+    const auth = createOAuth2Client(reqSession.tokens);
+    // Create sheet on first save, persist the ID in the session
+    if (!reqSession.sheetId) {
+      reqSession.sheetId = await createUserSheet(auth);
     }
     const sheets = google.sheets({ version: "v4", auth });
     const rows = leads.map((l) => [
@@ -118,7 +129,7 @@ async function saveToUserSheet(session, leads) {
       new Date().toISOString(),
     ]);
     await sheets.spreadsheets.values.append({
-      spreadsheetId: session.sheetId,
+      spreadsheetId: reqSession.sheetId,
       range: "Leads!A:G",
       valueInputOption: "RAW",
       requestBody: { values: rows },
@@ -1096,6 +1107,8 @@ app.get("/auth/google", (req, res) => {
   if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
     return res.status(500).json({ error: "Google OAuth not configured" });
   }
+  // Step 1: Generate Google consent URL and redirect the user there.
+  // The state param is unused now (session cookie handles identity).
   const client = createOAuth2Client();
   const url = client.generateAuthUrl({
     access_type: "offline",
@@ -1105,47 +1118,50 @@ app.get("/auth/google", (req, res) => {
       "https://www.googleapis.com/auth/drive.file",
       "https://www.googleapis.com/auth/userinfo.email",
     ],
-    state: req.query.session_id || "",
   });
   res.redirect(url);
 });
 
+// Step 2: Google redirects here after user grants access.
+// We exchange the code for tokens and store them in req.session.
 app.get("/auth/google/callback", async (req, res) => {
   try {
     const client = createOAuth2Client();
     const { tokens } = await client.getToken(req.query.code);
     client.setCredentials(tokens);
 
-    // Get user email
+    // Get user email for display
     const oauth2 = google.oauth2({ version: "v2", auth: client });
     const userInfo = await oauth2.userinfo.get();
-    const email = userInfo.data.email;
 
-    // Store in session
-    const sessionId = req.query.state || crypto.randomUUID();
-    sessions.set(sessionId, { tokens, sheetId: null, email });
-    console.log(`  OAuth: connected ${email} (session ${sessionId})`);
+    // Tokens are stored in the express-session (cookie-backed).
+    // sheetId will be populated on first lead save.
+    req.session.tokens  = tokens;
+    req.session.email   = userInfo.data.email;
+    req.session.sheetId = null;
+    console.log(`  OAuth: connected ${req.session.email}`);
 
-    // Redirect back to frontend with session
-    res.redirect(`${FRONTEND_URL}?google_connected=true&session_id=${sessionId}`);
+    res.redirect(`${FRONTEND_URL}?google_connected=true`);
   } catch (err) {
     console.error("  OAuth callback error:", err.message);
     res.redirect(`${FRONTEND_URL}?google_connected=false&error=auth_failed`);
   }
 });
 
+// Check if user has a Google session
 app.get("/auth/status", (req, res) => {
-  const session = getSession(req);
-  if (session) {
-    res.json({ connected: true, email: session.email });
+  if (req.session.tokens) {
+    res.json({ connected: true, email: req.session.email });
   } else {
     res.json({ connected: false });
   }
 });
 
+// Destroy Google connection (clears tokens from session)
 app.post("/auth/disconnect", (req, res) => {
-  const sid = req.headers["x-session-id"];
-  if (sid) sessions.delete(sid);
+  req.session.tokens  = null;
+  req.session.email   = null;
+  req.session.sheetId = null;
   res.json({ disconnected: true });
 });
 
@@ -1206,11 +1222,10 @@ app.post("/api/search", async (req, res) => {
 
     console.log(`  Returning ${leads.length} leads (deduped)`);
 
-    // Save to user's own Google Sheet (non-blocking)
-    const session = getSession(req);
+    // Save to user's own Google Sheet via express-session tokens
     let savedToSheets = false;
-    if (session) {
-      savedToSheets = await saveToUserSheet(session, leads).catch(() => false);
+    if (req.session.tokens) {
+      savedToSheets = await saveToUserSheet(req.session, leads).catch(() => false);
     }
 
     res.json({ leads, savedToSheets });

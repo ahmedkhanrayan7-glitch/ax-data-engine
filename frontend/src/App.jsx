@@ -4,9 +4,8 @@ import "./App.css";
 
 const API_URL = import.meta.env.VITE_API_URL || "";
 
-function getSessionId() {
-  return localStorage.getItem("ax_session_id") || "";
-}
+// All requests include cookies so express-session can track the user
+const api = axios.create({ baseURL: API_URL, withCredentials: true });
 
 const SERVICES = [
   {
@@ -64,36 +63,24 @@ export default function App() {
   const [savedMsg, setSavedMsg] = useState("");
   const [googleUser, setGoogleUser] = useState(null); // { connected, email }
 
-  // On mount: check URL params from OAuth callback + check session status
+  // On mount: clean up OAuth redirect params + check session status via cookie
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const connected = params.get("google_connected");
-    const sid = params.get("session_id");
-    if (connected === "true" && sid) {
-      localStorage.setItem("ax_session_id", sid);
+    if (params.get("google_connected")) {
       window.history.replaceState({}, "", window.location.pathname);
     }
-    // Check auth status
-    const sessionId = getSessionId();
-    if (sessionId) {
-      axios.get(`${API_URL}/auth/status`, { headers: { "x-session-id": sessionId } })
-        .then((r) => setGoogleUser(r.data))
-        .catch(() => setGoogleUser({ connected: false }));
-    }
+    // Cookie-based session — just ask the backend if we're connected
+    api.get("/auth/status")
+      .then((r) => setGoogleUser(r.data))
+      .catch(() => setGoogleUser({ connected: false }));
   }, []);
 
   function connectGoogle() {
-    const sessionId = getSessionId() || crypto.randomUUID();
-    localStorage.setItem("ax_session_id", sessionId);
-    window.location.href = `${API_URL}/auth/google?session_id=${sessionId}`;
+    window.location.href = `${API_URL}/auth/google`;
   }
 
   function disconnectGoogle() {
-    const sessionId = getSessionId();
-    if (sessionId) {
-      axios.post(`${API_URL}/auth/disconnect`, {}, { headers: { "x-session-id": sessionId } }).catch(() => {});
-    }
-    localStorage.removeItem("ax_session_id");
+    api.post("/auth/disconnect").catch(() => {});
     setGoogleUser(null);
   }
 
@@ -118,16 +105,12 @@ export default function App() {
     setSearched(false);
 
     try {
-      const headers = {};
-      const sid = getSessionId();
-      if (sid) headers["x-session-id"] = sid;
-
-      const res = await axios.post(`${API_URL}/api/search`, {
+      const res = await api.post("/api/search", {
         service: activeService,
         niche: niche.trim(),
         location: location.trim(),
         roles,
-      }, { headers });
+      });
 
       // Support both old (array) and new ({ leads, savedToSheets }) response shapes
       const leads = Array.isArray(res.data) ? res.data : res.data.leads;
