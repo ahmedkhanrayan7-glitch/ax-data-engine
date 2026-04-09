@@ -1190,15 +1190,25 @@ app.post(["/search", "/api/search"], async (req, res) => {
   if (!hasTokens) console.log("  No Google tokens — proceeding without Sheets save");
 
   try {
-    // ── 1. Primary: Google Places API ────────────────────────────────
-    const placesLeads = await searchGooglePlaces(niche, location);
-    console.log(`  [DEBUG] Places API returned: ${placesLeads.length} leads`);
+    let allSources = [];
+    const liveNames = new Set();
 
-    // ── 1b. Puppeteer Google Maps scraper + email extraction ──────────
+    const addUnique = (arr) => {
+      const unique = [];
+      for (const b of arr) {
+        const k = b.name.toLowerCase().replace(/\s+/g, "");
+        if (liveNames.has(k)) continue;
+        liveNames.add(k);
+        unique.push(b);
+      }
+      return unique;
+    };
+
+    // ── 1. PRIMARY: Puppeteer Google Maps scraper ─────────────────────
+    console.log("  [Pipeline] Stage 1: Running Puppeteer scraper...");
     let mapsLeads = [];
     try {
       const rawMaps = await scrapeGoogleMapsWithEmails(niche, location, { maxResults: 40, timeoutMs: 30000 });
-      // Convert { name, link, emails } → pipeline format
       mapsLeads = rawMaps.map((b) => ({
         name: b.name,
         phone: null,
@@ -1206,71 +1216,73 @@ app.post(["/search", "/api/search"], async (req, res) => {
         address: null,
         emails: b.emails || [],
       }));
-      console.log(`  [DEBUG] GMaps Scraper returned: ${mapsLeads.length} leads (${mapsLeads.filter(l => l.emails.length).length} with emails)`);
+      console.log(`  [Pipeline] Puppeteer returned: ${mapsLeads.length} leads (${mapsLeads.filter(l => l.emails.length).length} with emails)`);
     } catch (err) {
-      console.log(`  [DEBUG] GMaps Scraper failed (non-fatal): ${err.message}`);
+      console.log(`  [Pipeline] Puppeteer failed (non-fatal): ${err.message}`);
+    }
+    allSources = addUnique(mapsLeads);
+
+    // ── 2. FALLBACK: Google Places API (if Puppeteer < 10 results) ───
+    if (allSources.length < 10) {
+      console.log(`  [Pipeline] Stage 2: Puppeteer only got ${allSources.length} — falling back to Places API...`);
+      const placesLeads = await searchGooglePlaces(niche, location);
+      console.log(`  [Pipeline] Places API returned: ${placesLeads.length} leads`);
+      const uniquePlaces = addUnique(placesLeads);
+      allSources = [...allSources, ...uniquePlaces];
+    } else {
+      console.log(`  [Pipeline] Puppeteer sufficient (${allSources.length}) — skipping Places API`);
     }
 
-    // ── 2. Secondary: HTML scraping sources (always run, merged in) ──
-    let scrapeLeads = [];
-    const deficit = 80 - placesLeads.length - mapsLeads.length;
-    if (deficit > 0) {
-      scrapeLeads = await scrapingDiscovery(niche, location);
-      console.log(`  [DEBUG] HTML Scraping returned: ${scrapeLeads.length} leads`);
+    // ── 3. FALLBACK: HTML scraping (if still < 20 results) ───────────
+    if (allSources.length < 20) {
+      console.log(`  [Pipeline] Stage 3: Only ${allSources.length} leads — falling back to HTML scraping...`);
+      const scrapeLeads = await scrapingDiscovery(niche, location);
+      console.log(`  [Pipeline] HTML scraping returned: ${scrapeLeads.length} leads`);
+      const uniqueScrape = addUnique(scrapeLeads);
+      allSources = [...allSources, ...uniqueScrape];
+    } else {
+      console.log(`  [Pipeline] Sufficient leads (${allSources.length}) — skipping HTML scraping`);
     }
 
-    // ── 3. Merge all live sources, dedup by name ──────────────────────
-    const liveNames = new Set(placesLeads.map((b) => b.name.toLowerCase().replace(/\s+/g, "")));
+    // ── 4. FALLBACK: Seed data (if still empty) ──────────────────────
+    if (allSources.length === 0) {
+      console.log("  [Pipeline] Stage 4: No live results — falling back to seed data...");
+      const seeds = getSeedLeads(niche);
+      const uniqueSeeds = addUnique(seeds);
+      allSources = [...allSources, ...uniqueSeeds];
+      console.log(`  [Pipeline] Seeds added: ${uniqueSeeds.length}`);
+    }
 
-    // Merge Maps scraper results (unique only)
-    const uniqueMaps = mapsLeads.filter((b) => {
-      const k = b.name.toLowerCase().replace(/\s+/g, "");
-      if (liveNames.has(k)) return false;
-      liveNames.add(k);
-      return true;
-    });
-
-    // Merge HTML scraping results (unique only)
-    const uniqueScrape = scrapeLeads.filter((b) => {
-      const k = b.name.toLowerCase().replace(/\s+/g, "");
-      if (liveNames.has(k)) return false;
-      liveNames.add(k);
-      return true;
-    });
-
-    const liveAll = [...placesLeads, ...uniqueMaps, ...uniqueScrape];
-    console.log(`  [DEBUG] Live results after merge: ${liveAll.length} (places: ${placesLeads.length}, maps: ${uniqueMaps.length}, scrape: ${uniqueScrape.length})`);
-
-    // ── 4. Pad with seeds to guarantee 80 phone-bearing candidates ───
-    const seeds     = getSeedLeads(niche);
-    const padded    = seeds.filter((s) => !liveNames.has(s.name.toLowerCase().replace(/\s+/g, "")));
-    const candidates = [...liveAll, ...padded].slice(0, 80);
-    console.log(`  [DEBUG] Candidates (live + seeds): ${candidates.length} (seeds added: ${padded.length})`);
+    console.log(`  [Pipeline] Total candidates after all stages: ${allSources.length}`);
 
     // ── 5. Normalize non-Latin names (single batch API call) ────────
+    const candidates = allSources.slice(0, 80);
     await batchNormalizeNames(candidates);
 
-    // ── 6. Enrich concurrently ────────────────────────────────────────
+    // ── 6. Enrich only the first 20 leads ─────────────────────────────
+    const toEnrich = candidates.slice(0, 20);
+    console.log(`  [Pipeline] Enriching top ${toEnrich.length} leads (of ${candidates.length} candidates)...`);
+
     const settled = await Promise.allSettled(
-      candidates.map((b) => enrichLead(b, niche))
+      toEnrich.map((b) => enrichLead(b, niche))
     );
 
     const fulfilled = settled.filter((r) => r.status === "fulfilled").map((r) => r.value);
     const rejected  = settled.filter((r) => r.status === "rejected");
-    console.log(`  [DEBUG] Enrichment: ${fulfilled.length} ok, ${rejected.length} failed`);
+    console.log(`  [Pipeline] Enrichment: ${fulfilled.length} ok, ${rejected.length} failed`);
     if (rejected.length > 0) {
-      console.log(`  [DEBUG] Sample rejection: ${rejected[0].reason?.message || rejected[0].reason}`);
+      console.log(`  [Pipeline] Sample rejection: ${rejected[0].reason?.message || rejected[0].reason}`);
     }
 
     const allLeads = fulfilled.sort((a, b) => b.lead_score - a.lead_score);
 
     // Dedup filter — but if it empties everything, skip it
     let leads = filterUsed(allLeads).slice(0, 50);
-    console.log(`  [DEBUG] After dedup filter: ${leads.length} (cache size: ${usedLeads.size})`);
+    console.log(`  [Pipeline] After dedup filter: ${leads.length} (cache size: ${usedLeads.size})`);
 
     // SAFETY: if dedup removed everything, clear cache and return unfiltered
     if (leads.length === 0 && allLeads.length > 0) {
-      console.log("  [DEBUG] Dedup emptied results — clearing cache and returning unfiltered");
+      console.log("  [Pipeline] Dedup emptied results — clearing cache and returning unfiltered");
       usedLeads.clear();
       leads = allLeads.slice(0, 50);
     }
@@ -1284,7 +1296,7 @@ app.post(["/search", "/api/search"], async (req, res) => {
       console.log(`  Sheets save: ${savedToSheets ? "OK" : "failed (non-fatal)"}`);
     }
 
-    res.json({ leads, savedToSheets });
+    res.json({ source: "puppeteer_priority", leads, savedToSheets });
 
   } catch (err) {
     console.error("  Pipeline failed:", err.message);
