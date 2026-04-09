@@ -1175,9 +1175,9 @@ app.post("/auth/disconnect", (req, res) => {
   res.json({ disconnected: true });
 });
 
-// ── Search route ─────────────────────────────────────────────────
+// ── Search route (both /search and /api/search) ──────────────────
 
-app.post("/api/search", async (req, res) => {
+app.post(["/search", "/api/search"], async (req, res) => {
   const { niche, location, service = "business_finder" } = req.body;
 
   if (!niche || !location) {
