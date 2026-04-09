@@ -48,6 +48,7 @@ const SCORE_COLOR = (s) => {
 };
 
 export default function App() {
+  const [consent, setConsent] = useState(() => localStorage.getItem("user_consent") === "true");
   const [activeService, setActiveService] = useState("business_finder");
   const [niche,    setNiche]    = useState("");
   const [location, setLocation] = useState("");
@@ -56,6 +57,12 @@ export default function App() {
   const [loading,  setLoading]  = useState(false);
   const [error,    setError]    = useState("");
   const [searched, setSearched] = useState(false);
+  const [savedMsg, setSavedMsg] = useState("");
+
+  function acceptConsent() {
+    localStorage.setItem("user_consent", "true");
+    setConsent(true);
+  }
 
   function toggleRole(role) {
     setRoles((prev) =>
@@ -81,6 +88,10 @@ export default function App() {
       });
       setResults(res.data);
       setSearched(true);
+      if (res.data.length > 0) {
+        setSavedMsg("Leads saved to Google Sheets");
+        setTimeout(() => setSavedMsg(""), 4000);
+      }
     } catch {
       setError("Could not reach the server. Please try again later.");
     } finally {
@@ -90,8 +101,28 @@ export default function App() {
 
   const service = SERVICES.find((s) => s.id === activeService);
 
+  if (!consent) {
+    return (
+      <div className="consent-overlay">
+        <div className="consent-modal">
+          <span className="consent-icon">▲</span>
+          <h2 className="consent-title">Privacy & Data Consent</h2>
+          <p className="consent-text">
+            By using this platform, you agree that all extracted business data
+            (emails, phone numbers, contacts) will be stored in Google Sheets.
+          </p>
+          <button className="consent-btn" onClick={acceptConsent}>
+            I Agree — Continue
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="app">
+
+      {savedMsg && <div className="saved-banner">{savedMsg}</div>}
 
       {/* ── Header ── */}
       <header className="header">

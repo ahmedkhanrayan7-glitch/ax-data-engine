@@ -37,6 +37,66 @@ app.use(express.json());
 
 const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY || null;
 
+// ─────────────────────────────────────────────────────────────────
+// GOOGLE SHEETS INTEGRATION
+// ─────────────────────────────────────────────────────────────────
+const { google } = require("googleapis");
+
+async function saveToSheets(leads) {
+  const sheetId     = process.env.GOOGLE_SHEET_ID;
+  const clientEmail = process.env.GOOGLE_CLIENT_EMAIL;
+  const rawKey      = process.env.GOOGLE_PRIVATE_KEY;
+  if (!sheetId || !clientEmail || !rawKey) {
+    console.log("  Sheets: skipped (env vars not set)");
+    return;
+  }
+  try {
+    const privateKey = rawKey.replace(/\\n/g, "\n");
+    const auth = new google.auth.JWT(clientEmail, null, privateKey, [
+      "https://www.googleapis.com/auth/spreadsheets",
+    ]);
+    const sheets = google.sheets({ version: "v4", auth });
+    const rows = leads.map((l) => [
+      l.company        || "",
+      l.website        || "",
+      l.email          || l.generated_emails?.[0] || "",
+      l.phone          || "",
+      l.decision_maker || "",
+      l.lead_score     ?? "",
+      new Date().toISOString(),
+    ]);
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: sheetId,
+      range: "Sheet1!A:G",
+      valueInputOption: "RAW",
+      requestBody: { values: rows },
+    });
+    console.log(`  Sheets: saved ${rows.length} leads`);
+  } catch (err) {
+    console.error("  Sheets error (non-fatal):", err.message);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// DEDUP CACHE — prevents returning the same leads across requests
+// ─────────────────────────────────────────────────────────────────
+const usedLeads = new Set();
+const DEDUP_MAX = 5000; // auto-clear when cache grows too large
+
+function dedupKey(lead) {
+  return (lead.company || lead.name || "").toLowerCase().replace(/\s+/g, "");
+}
+
+function filterUsed(leads) {
+  if (usedLeads.size > DEDUP_MAX) usedLeads.clear();
+  const fresh = leads.filter((l) => {
+    const key = dedupKey(l);
+    return key && !usedLeads.has(key);
+  });
+  fresh.forEach((l) => usedLeads.add(dedupKey(l)));
+  return fresh;
+}
+
 const MEDICAL_KEYWORDS = ["dental", "dentist", "clinic", "hospital", "pharmacy", "medical", "health", "doctor"];
 const LEGAL_KEYWORDS   = ["lawyer", "law", "attorney", "legal", "advocate"];
 
@@ -1022,13 +1082,15 @@ app.post("/api/search", async (req, res) => {
       candidates.map((b) => enrichLead(b, niche))
     );
 
-    const leads = settled
+    const allLeads = settled
       .filter((r) => r.status === "fulfilled")
       .map((r) => r.value)
-      .sort((a, b) => b.lead_score - a.lead_score)
-      .slice(0, 50);
+      .sort((a, b) => b.lead_score - a.lead_score);
 
-    console.log(`  Returning ${leads.length} leads`);
+    const leads = filterUsed(allLeads).slice(0, 50);
+
+    console.log(`  Returning ${leads.length} leads (deduped)`);
+    saveToSheets(leads).catch(() => {});
     res.json(leads);
 
   } catch (err) {
