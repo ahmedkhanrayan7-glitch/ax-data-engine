@@ -5,12 +5,12 @@ const axios   = require("axios");
 const cheerio = require("cheerio");
 const fs      = require("fs");
 const path    = require("path");
-// Puppeteer Maps scraper — optional, fails gracefully if puppeteer not installed
-let scrapeGoogleMaps;
+// Puppeteer Google Maps scraper (with email extraction) — optional, fails gracefully
+let scrapeGoogleMapsWithEmails;
 try {
-  scrapeGoogleMaps = require("./scraper/mapsScraper").scrapeGoogleMaps;
+  scrapeGoogleMapsWithEmails = require("./scraper/googleMapsScraper");
 } catch {
-  scrapeGoogleMaps = async () => { console.log("  [Maps Scraper] puppeteer not available"); return []; };
+  scrapeGoogleMapsWithEmails = async () => { console.log("  [GMaps Scraper] puppeteer not available"); return []; };
 }
 
 const app  = express();
@@ -1194,21 +1194,21 @@ app.post(["/search", "/api/search"], async (req, res) => {
     const placesLeads = await searchGooglePlaces(niche, location);
     console.log(`  [DEBUG] Places API returned: ${placesLeads.length} leads`);
 
-    // ── 1b. Puppeteer Google Maps scraper (parallel, non-blocking) ───
+    // ── 1b. Puppeteer Google Maps scraper + email extraction ──────────
     let mapsLeads = [];
     try {
-      const rawMaps = await scrapeGoogleMaps(niche, location, { maxResults: 40, timeoutMs: 30000 });
-      // Convert Maps scraper format { name, rating } → pipeline format { name, phone }
+      const rawMaps = await scrapeGoogleMapsWithEmails(niche, location, { maxResults: 40, timeoutMs: 30000 });
+      // Convert { name, link, emails } → pipeline format
       mapsLeads = rawMaps.map((b) => ({
         name: b.name,
         phone: null,
-        website: null,
+        website: (b.link && !b.link.includes("google.com/maps")) ? b.link : null,
         address: null,
-        rating: b.rating,
+        emails: b.emails || [],
       }));
-      console.log(`  [DEBUG] Maps Scraper returned: ${mapsLeads.length} leads`);
+      console.log(`  [DEBUG] GMaps Scraper returned: ${mapsLeads.length} leads (${mapsLeads.filter(l => l.emails.length).length} with emails)`);
     } catch (err) {
-      console.log(`  [DEBUG] Maps Scraper failed (non-fatal): ${err.message}`);
+      console.log(`  [DEBUG] GMaps Scraper failed (non-fatal): ${err.message}`);
     }
 
     // ── 2. Secondary: HTML scraping sources (always run, merged in) ──
