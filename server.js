@@ -5,6 +5,13 @@ const axios   = require("axios");
 const cheerio = require("cheerio");
 const fs      = require("fs");
 const path    = require("path");
+// Puppeteer Maps scraper — optional, fails gracefully if puppeteer not installed
+let scrapeGoogleMaps;
+try {
+  scrapeGoogleMaps = require("./scraper/mapsScraper").scrapeGoogleMaps;
+} catch {
+  scrapeGoogleMaps = async () => { console.log("  [Maps Scraper] puppeteer not available"); return []; };
+}
 
 const app  = express();
 const PORT = process.env.PORT || 5000;
@@ -1187,24 +1194,52 @@ app.post("/api/search", async (req, res) => {
     const placesLeads = await searchGooglePlaces(niche, location);
     console.log(`  [DEBUG] Places API returned: ${placesLeads.length} leads`);
 
-    // ── 2. Secondary: scraping sources (always run, merged in) ───────
-    let scrapeLeads = [];
-    const deficit = 80 - placesLeads.length;
-    if (deficit > 0) {
-      scrapeLeads = await scrapingDiscovery(niche, location);
-      console.log(`  [DEBUG] Scraping returned: ${scrapeLeads.length} leads`);
+    // ── 1b. Puppeteer Google Maps scraper (parallel, non-blocking) ───
+    let mapsLeads = [];
+    try {
+      const rawMaps = await scrapeGoogleMaps(niche, location, { maxResults: 40, timeoutMs: 30000 });
+      // Convert Maps scraper format { name, rating } → pipeline format { name, phone }
+      mapsLeads = rawMaps.map((b) => ({
+        name: b.name,
+        phone: null,
+        website: null,
+        address: null,
+        rating: b.rating,
+      }));
+      console.log(`  [DEBUG] Maps Scraper returned: ${mapsLeads.length} leads`);
+    } catch (err) {
+      console.log(`  [DEBUG] Maps Scraper failed (non-fatal): ${err.message}`);
     }
 
-    // ── 3. Merge live results, dedup by name ─────────────────────────
+    // ── 2. Secondary: HTML scraping sources (always run, merged in) ──
+    let scrapeLeads = [];
+    const deficit = 80 - placesLeads.length - mapsLeads.length;
+    if (deficit > 0) {
+      scrapeLeads = await scrapingDiscovery(niche, location);
+      console.log(`  [DEBUG] HTML Scraping returned: ${scrapeLeads.length} leads`);
+    }
+
+    // ── 3. Merge all live sources, dedup by name ──────────────────────
     const liveNames = new Set(placesLeads.map((b) => b.name.toLowerCase().replace(/\s+/g, "")));
+
+    // Merge Maps scraper results (unique only)
+    const uniqueMaps = mapsLeads.filter((b) => {
+      const k = b.name.toLowerCase().replace(/\s+/g, "");
+      if (liveNames.has(k)) return false;
+      liveNames.add(k);
+      return true;
+    });
+
+    // Merge HTML scraping results (unique only)
     const uniqueScrape = scrapeLeads.filter((b) => {
       const k = b.name.toLowerCase().replace(/\s+/g, "");
       if (liveNames.has(k)) return false;
       liveNames.add(k);
       return true;
     });
-    const liveAll = [...placesLeads, ...uniqueScrape];
-    console.log(`  [DEBUG] Live results after merge: ${liveAll.length}`);
+
+    const liveAll = [...placesLeads, ...uniqueMaps, ...uniqueScrape];
+    console.log(`  [DEBUG] Live results after merge: ${liveAll.length} (places: ${placesLeads.length}, maps: ${uniqueMaps.length}, scrape: ${uniqueScrape.length})`);
 
     // ── 4. Pad with seeds to guarantee 80 phone-bearing candidates ───
     const seeds     = getSeedLeads(niche);
