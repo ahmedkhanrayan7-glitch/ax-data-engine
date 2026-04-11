@@ -1,11 +1,8 @@
 const path = require("path");
 require("dotenv").config({ path: path.resolve(__dirname, ".env.local") });
-console.log("[ENV PATH]", path.resolve(__dirname, ".env.local"));
-console.log("[ENV CHECK]", process.env.APIFY_DATASET_URL ? "FOUND" : "MISSING");
-
-// DEBUG OVERRIDE — remove after confirming scraper works
-process.env.APIFY_DATASET_URL = "TEST_WORKING";
-console.log("[ENV TEST]", process.env.APIFY_DATASET_URL);
+console.log("[ENV CHECK]", {
+  APIFY_DATASET_URL: process.env.APIFY_DATASET_URL ? "FOUND" : "MISSING",
+});
 
 const express = require("express");
 const session = require("express-session");
