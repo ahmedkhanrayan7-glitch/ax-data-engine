@@ -1188,16 +1188,54 @@ app.post("/auth/disconnect", (req, res) => {
 const APIFY_TOKEN    = (process.env.APIFY_DATASET_URL || "").match(/token=([^&]+)/)?.[1] || "";
 const APIFY_ACTOR_ID = "nwua9Gu5YrADL7ZDj"; // compass/crawler-google-places
 
+function buildSearchStrings(niche, location) {
+  // Keyword variations for the niche
+  const nicheKeywords = [niche];
+  const lower = niche.toLowerCase();
+  if (lower.includes("dent")) {
+    nicheKeywords.push("dental clinic", "dentist", "teeth whitening", "dental care", "oral clinic");
+  } else if (lower.includes("law") || lower.includes("legal") || lower.includes("attorney")) {
+    nicheKeywords.push("law firm", "lawyer", "attorney", "legal services", "solicitor");
+  } else if (lower.includes("medical") || lower.includes("doctor") || lower.includes("clinic")) {
+    nicheKeywords.push("medical clinic", "GP clinic", "health centre", "doctor", "physician");
+  }
+
+  // Nearby suburb/area variations derived from location
+  const nearbyAreas = [location];
+  const locLower = location.toLowerCase();
+  if (locLower.includes("sydney")) {
+    nearbyAreas.push("Parramatta", "Bondi", "Chatswood", "Manly", "Surry Hills");
+  } else if (locLower.includes("melbourne")) {
+    nearbyAreas.push("Richmond", "St Kilda", "Fitzroy", "South Yarra", "Brunswick");
+  } else if (locLower.includes("london")) {
+    nearbyAreas.push("Shoreditch", "Canary Wharf", "Camden", "Islington", "Chelsea");
+  }
+
+  // Build all unique combinations (deduplicated)
+  const seen = new Set();
+  const queries = [];
+  for (const kw of nicheKeywords) {
+    for (const area of nearbyAreas) {
+      const q = `${kw} ${area}`;
+      if (!seen.has(q)) { seen.add(q); queries.push(q); }
+    }
+  }
+  console.log(`  [Apify] Search strings (${queries.length}): ${queries.slice(0, 3).join(" | ")}...`);
+  return queries;
+}
+
 async function runApifyActor(niche, location) {
   if (!APIFY_TOKEN) throw new Error("APIFY_TOKEN not configured");
 
-  // 1. Start run
+  const searchStrings = buildSearchStrings(niche, location);
+
+  // 1. Start run — all keyword+area combos in one actor run
   const runResp = await axios.post(
     `https://api.apify.com/v2/acts/${APIFY_ACTOR_ID}/runs?token=${APIFY_TOKEN}`,
     {
-      searchStringsArray:         [`${niche} in ${location}`],
+      searchStringsArray:         searchStrings,
       locationQuery:              location,
-      maxCrawledPlacesPerSearch:  500,
+      maxCrawledPlacesPerSearch:  100,
       language:                   "en",
       includeWebResults:          false,
       skipClosedPlaces:           false,
