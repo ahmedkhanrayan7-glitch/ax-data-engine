@@ -108,15 +108,17 @@ async function createUserSheet(auth) {
 
 // Save leads to the user's own sheet
 // Uses req.session (express-session) to read tokens and persist sheetId
-async function saveToUserSheet(reqSession, leads) {
+async function saveToUserSheet(reqSession, leads, selectedSheetId = null) {
   if (!reqSession || !reqSession.tokens) {
     console.log("  Sheets: skipped (user not connected)");
     return false;
   }
   try {
     const auth = createOAuth2Client(reqSession.tokens);
-    // Create sheet on first save, persist the ID in the session
-    if (!reqSession.sheetId) {
+    // Use selected sheet if provided, otherwise fall back to session sheet or create new
+    if (selectedSheetId) {
+      reqSession.sheetId = selectedSheetId;
+    } else if (!reqSession.sheetId) {
       reqSession.sheetId = await createUserSheet(auth);
     }
     const sheets = google.sheets({ version: "v4", auth });
@@ -1182,6 +1184,27 @@ app.post("/auth/disconnect", (req, res) => {
   res.json({ disconnected: true });
 });
 
+// ── List user's existing Google Sheets ───────────────────────────
+app.get("/user-sheets", async (req, res) => {
+  if (!req.session?.tokens) {
+    return res.status(401).json({ error: "Not connected to Google" });
+  }
+  try {
+    const auth  = createOAuth2Client(req.session.tokens);
+    const drive = google.drive({ version: "v3", auth });
+    const resp  = await drive.files.list({
+      q:      "mimeType='application/vnd.google-apps.spreadsheet' and trashed=false",
+      fields: "files(id, name)",
+      orderBy: "modifiedTime desc",
+      pageSize: 50,
+    });
+    res.json(resp.data.files || []);
+  } catch (err) {
+    console.error("  [Sheets] list error:", err.message);
+    res.status(500).json({ error: "Failed to fetch sheets" });
+  }
+});
+
 // ─────────────────────────────────────────────────────────────────
 // APIFY ACTOR RUNNER — triggers a fresh Google Places scrape each request
 // ─────────────────────────────────────────────────────────────────
@@ -1289,7 +1312,7 @@ async function runApifyActor(niche, location) {
 // ── Search route (both /search and /api/search) ──────────────────
 
 app.post(["/search", "/api/search"], async (req, res) => {
-  const { niche, location, service = "business_finder" } = req.body;
+  const { niche, location, service = "business_finder", sheetId: selectedSheetId = null } = req.body;
 
   if (!niche || !location) {
     return res.status(400).json({ error: "niche and location are required" });
@@ -1431,7 +1454,7 @@ app.post(["/search", "/api/search"], async (req, res) => {
     // Save to user's own Google Sheet (only if connected, never blocks results)
     let savedToSheets = false;
     if (req.session && req.session.tokens) {
-      savedToSheets = await saveToUserSheet(req.session, leads).catch(() => false);
+      savedToSheets = await saveToUserSheet(req.session, leads, selectedSheetId).catch(() => false);
       console.log(`  Sheets save: ${savedToSheets ? "OK" : "failed (non-fatal)"}`);
     }
 

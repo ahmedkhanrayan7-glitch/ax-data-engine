@@ -62,6 +62,8 @@ export default function App() {
   const [searched, setSearched] = useState(false);
   const [savedMsg, setSavedMsg] = useState("");
   const [googleUser, setGoogleUser] = useState(null); // { connected, email }
+  const [userSheets, setUserSheets] = useState([]);
+  const [selectedSheetId, setSelectedSheetId] = useState("");
 
   // On mount: clean up OAuth redirect params + check session status via cookie
   useEffect(() => {
@@ -71,9 +73,21 @@ export default function App() {
     }
     // Cookie-based session — just ask the backend if we're connected
     api.get("/auth/status")
-      .then((r) => setGoogleUser(r.data))
+      .then((r) => {
+        setGoogleUser(r.data);
+        if (r.data?.connected) fetchUserSheets();
+      })
       .catch(() => setGoogleUser({ connected: false }));
   }, []);
+
+  async function fetchUserSheets() {
+    try {
+      const r = await api.get("/user-sheets");
+      setUserSheets(r.data || []);
+    } catch {
+      setUserSheets([]);
+    }
+  }
 
   function connectGoogle() {
     window.location.href = `${API_URL}/auth/google`;
@@ -82,6 +96,8 @@ export default function App() {
   function disconnectGoogle() {
     api.post("/auth/disconnect").catch(() => {});
     setGoogleUser(null);
+    setUserSheets([]);
+    setSelectedSheetId("");
   }
 
   function acceptConsent() {
@@ -110,6 +126,7 @@ export default function App() {
         niche: niche.trim(),
         location: location.trim(),
         roles,
+        sheetId: selectedSheetId || undefined,
       });
 
       // Support both old (array) and new ({ leads, savedToSheets }) response shapes
@@ -166,6 +183,18 @@ export default function App() {
               <div className="google-status">
                 <span className="google-dot" />
                 <span className="google-email">{googleUser.email}</span>
+                {userSheets.length > 0 && (
+                  <select
+                    className="sheet-select"
+                    value={selectedSheetId}
+                    onChange={(e) => setSelectedSheetId(e.target.value)}
+                  >
+                    <option value="">Auto-create sheet</option>
+                    {userSheets.map((s) => (
+                      <option key={s.id} value={s.id}>{s.name}</option>
+                    ))}
+                  </select>
+                )}
                 <button className="google-disconnect" onClick={disconnectGoogle}>Disconnect</button>
               </div>
             ) : (
