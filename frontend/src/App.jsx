@@ -60,6 +60,7 @@ export default function App() {
   const [loading,  setLoading]  = useState(false);
   const [error,    setError]    = useState("");
   const [searched, setSearched] = useState(false);
+  const [batchNum, setBatchNum] = useState(0);
   const [savedMsg, setSavedMsg] = useState("");
   const [googleUser, setGoogleUser] = useState(null); // { connected, email }
   const [userSheets, setUserSheets] = useState([]);
@@ -119,6 +120,7 @@ export default function App() {
     setError("");
     setResults([]);
     setSearched(false);
+    if (!batchNum) setBatchNum(0); // reset label on first run
 
     try {
       const res = await api.post("/api/search", {
@@ -132,8 +134,10 @@ export default function App() {
       // Support both old (array) and new ({ leads, savedToSheets }) response shapes
       const leads = Array.isArray(res.data) ? res.data : res.data.leads;
       const saved = res.data.savedToSheets || false;
+      const batch = res.data.batchNum || 1;
 
       setResults(leads);
+      setBatchNum(batch);
       setSearched(true);
       if (leads.length > 0 && saved) {
         setSavedMsg("Leads saved to your Google Sheets");
@@ -272,7 +276,7 @@ export default function App() {
             <button type="submit" className="run-btn" disabled={loading}>
               {loading
                 ? <><span className="spinner" /> Extracting data…</>
-                : `Run ${service.title}`}
+                : batchNum > 0 ? `Next Batch (${batchNum + 1})` : `Run ${service.title}`}
             </button>
           </form>
         </section>
@@ -285,7 +289,7 @@ export default function App() {
             <div className="results-header">
               <span className="results-count">
                 {results.length > 0
-                  ? `${results.length} results · sorted by lead score`
+                  ? `Batch ${batchNum} · ${results.length} leads`
                   : "No results found"}
               </span>
               {results.length > 0 && (

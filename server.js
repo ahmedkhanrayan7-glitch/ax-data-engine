@@ -148,6 +148,17 @@ async function saveToUserSheet(reqSession, leads, selectedSheetId = null) {
 // ─────────────────────────────────────────────────────────────────
 // DEDUP CACHE — prevents returning the same leads across requests
 // ─────────────────────────────────────────────────────────────────
+// BATCH OFFSET — returns 7 leads per run, advancing through pool
+// ─────────────────────────────────────────────────────────────────
+const BATCH_SIZE   = 7;
+const batchOffset  = {}; // key → current offset into enrichedPool
+const enrichedPool = {}; // key → array of all enriched leads for that search
+
+function batchKey(niche, location) {
+  return `${niche.toLowerCase().trim()}_${location.toLowerCase().trim()}`;
+}
+
+// ─────────────────────────────────────────────────────────────────
 // DEDUP — per-location, uses strongest available unique identifier
 // ─────────────────────────────────────────────────────────────────
 const seenByLocation = {};
@@ -1436,20 +1447,31 @@ app.post(["/search", "/api/search"], async (req, res) => {
     }
 
     const allLeads = fulfilled.sort((a, b) => b.lead_score - a.lead_score);
+    const key = batchKey(niche, location);
 
-    // Dedup filter per location — but if it empties everything, reset and return unfiltered
-    let leads = filterUsed(allLeads, location).slice(0, 50);
-    console.log(`  [Pipeline] After dedup filter: ${leads.length}`);
-
-    // SAFETY: if dedup removed everything, clear this location's cache and return unfiltered
-    if (leads.length === 0 && allLeads.length > 0) {
-      console.log("  [Pipeline] Dedup emptied results — clearing location cache and returning unfiltered");
-      const locKey = location.toLowerCase().replace(/\s+/g, "_");
-      if (seenByLocation[locKey]) seenByLocation[locKey].clear();
-      leads = allLeads.slice(0, 50);
+    // Append fresh enriched leads into the pool for this search key (deduped)
+    if (!enrichedPool[key]) enrichedPool[key] = [];
+    const existingIds = new Set(enrichedPool[key].map(dedupKey));
+    for (const lead of allLeads) {
+      if (!existingIds.has(dedupKey(lead))) {
+        enrichedPool[key].push(lead);
+        existingIds.add(dedupKey(lead));
+      }
     }
 
-    console.log(`  Returning ${leads.length} leads`);
+    // Advance offset — reset if pool exhausted
+    if (!batchOffset[key]) batchOffset[key] = 0;
+    if (batchOffset[key] >= enrichedPool[key].length) {
+      console.log("  [Pipeline] Pool exhausted — resetting offset to 0");
+      batchOffset[key] = 0;
+    }
+
+    const offset   = batchOffset[key];
+    const leads    = enrichedPool[key].slice(offset, offset + BATCH_SIZE);
+    const batchNum = Math.floor(offset / BATCH_SIZE) + 1;
+    batchOffset[key] += BATCH_SIZE;
+
+    console.log(`  [Pipeline] Batch ${batchNum}: leads ${offset}–${offset + leads.length - 1} of ${enrichedPool[key].length} in pool`);
 
     // Save to user's own Google Sheet (only if connected, never blocks results)
     let savedToSheets = false;
@@ -1458,7 +1480,7 @@ app.post(["/search", "/api/search"], async (req, res) => {
       console.log(`  Sheets save: ${savedToSheets ? "OK" : "failed (non-fatal)"}`);
     }
 
-    res.json({ source: "puppeteer_priority", leads, savedToSheets });
+    res.json({ source: "puppeteer_priority", leads, savedToSheets, batchNum });
 
   } catch (err) {
     console.error("  Pipeline failed:", err.message);
