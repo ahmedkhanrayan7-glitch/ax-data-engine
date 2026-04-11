@@ -146,20 +146,33 @@ async function saveToUserSheet(reqSession, leads) {
 // ─────────────────────────────────────────────────────────────────
 // DEDUP CACHE — prevents returning the same leads across requests
 // ─────────────────────────────────────────────────────────────────
-const usedLeads = new Set();
-const DEDUP_MAX = 5000; // auto-clear when cache grows too large
+// DEDUP — per-location, uses strongest available unique identifier
+// ─────────────────────────────────────────────────────────────────
+const seenByLocation = {};
+const DEDUP_MAX = 2000; // clear a location's set when it grows too large
 
 function dedupKey(lead) {
-  return (lead.company || lead.name || "").toLowerCase().replace(/\s+/g, "");
+  // Prefer stable IDs over mutable text
+  if (lead.placeId)  return `pid:${lead.placeId}`;
+  if (lead.website)  return `web:${lead.website.replace(/^https?:\/\/(www\.)?/, "").toLowerCase()}`;
+  if (lead.phone)    return `tel:${lead.phone.replace(/\D/g, "")}`;
+  const name = (lead.company || lead.name || "").toLowerCase().replace(/\s+/g, "");
+  const addr = (lead.address || "").toLowerCase().replace(/\s+/g, "");
+  return `nam:${name}${addr}`;
 }
 
-function filterUsed(leads) {
-  if (usedLeads.size > DEDUP_MAX) usedLeads.clear();
+function filterUsed(leads, location = "global") {
+  const key = location.toLowerCase().replace(/\s+/g, "_");
+  if (!seenByLocation[key]) seenByLocation[key] = new Set();
+  const seen = seenByLocation[key];
+
+  if (seen.size > DEDUP_MAX) seen.clear();
+
   const fresh = leads.filter((l) => {
-    const key = dedupKey(l);
-    return key && !usedLeads.has(key);
+    const id = dedupKey(l);
+    return id && !seen.has(id);
   });
-  fresh.forEach((l) => usedLeads.add(dedupKey(l)));
+  fresh.forEach((l) => seen.add(dedupKey(l)));
   return fresh;
 }
 
@@ -1350,14 +1363,15 @@ app.post(["/search", "/api/search"], async (req, res) => {
 
     const allLeads = fulfilled.sort((a, b) => b.lead_score - a.lead_score);
 
-    // Dedup filter — but if it empties everything, skip it
-    let leads = filterUsed(allLeads).slice(0, 50);
-    console.log(`  [Pipeline] After dedup filter: ${leads.length} (cache size: ${usedLeads.size})`);
+    // Dedup filter per location — but if it empties everything, reset and return unfiltered
+    let leads = filterUsed(allLeads, location).slice(0, 50);
+    console.log(`  [Pipeline] After dedup filter: ${leads.length}`);
 
-    // SAFETY: if dedup removed everything, clear cache and return unfiltered
+    // SAFETY: if dedup removed everything, clear this location's cache and return unfiltered
     if (leads.length === 0 && allLeads.length > 0) {
-      console.log("  [Pipeline] Dedup emptied results — clearing cache and returning unfiltered");
-      usedLeads.clear();
+      console.log("  [Pipeline] Dedup emptied results — clearing location cache and returning unfiltered");
+      const locKey = location.toLowerCase().replace(/\s+/g, "_");
+      if (seenByLocation[locKey]) seenByLocation[locKey].clear();
       leads = allLeads.slice(0, 50);
     }
 
