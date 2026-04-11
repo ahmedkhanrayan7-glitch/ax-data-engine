@@ -1197,7 +1197,7 @@ async function runApifyActor(niche, location) {
     {
       searchStringsArray:         [`${niche} in ${location}`],
       locationQuery:              location,
-      maxCrawledPlacesPerSearch:  50,
+      maxCrawledPlacesPerSearch:  500,
       language:                   "en",
       includeWebResults:          false,
       skipClosedPlaces:           false,
@@ -1225,14 +1225,27 @@ async function runApifyActor(niche, location) {
   }
   if (status !== "SUCCEEDED") throw new Error("Apify run timed out");
 
-  // 3. Fetch results from the new dataset
-  const itemsResp = await axios.get(
-    `https://api.apify.com/v2/datasets/${datasetId}/items?token=${APIFY_TOKEN}&clean=true`,
-    { timeout: 15000 }
-  );
-  const items = Array.isArray(itemsResp.data) ? itemsResp.data : [];
-  console.log(`  [Apify] Fetched ${items.length} fresh items from dataset ${datasetId}`);
-  return items;
+  // 3. Paginated fetch — loop until no more items (safety cap: 1000)
+  const allItems = [];
+  const BATCH    = 50;
+  const MAX      = 1000;
+  let   offset   = 0;
+
+  while (allItems.length < MAX) {
+    const resp = await axios.get(
+      `https://api.apify.com/v2/datasets/${datasetId}/items?token=${APIFY_TOKEN}&clean=true&offset=${offset}&limit=${BATCH}`,
+      { timeout: 15000 }
+    );
+    const batch = Array.isArray(resp.data) ? resp.data : [];
+    if (batch.length === 0) break;
+    allItems.push(...batch);
+    offset += batch.length;
+    console.log(`  [Apify] Fetched batch: ${batch.length} (total so far: ${allItems.length})`);
+    if (batch.length < BATCH) break; // last page
+  }
+
+  console.log(`  [Apify] All items fetched: ${allItems.length} from dataset ${datasetId}`);
+  return allItems;
 }
 
 // ── Search route (both /search and /api/search) ──────────────────
