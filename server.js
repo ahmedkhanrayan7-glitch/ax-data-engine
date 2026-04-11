@@ -1171,6 +1171,59 @@ app.post("/auth/disconnect", (req, res) => {
   res.json({ disconnected: true });
 });
 
+// ─────────────────────────────────────────────────────────────────
+// APIFY ACTOR RUNNER — triggers a fresh Google Places scrape each request
+// ─────────────────────────────────────────────────────────────────
+const APIFY_TOKEN    = (process.env.APIFY_DATASET_URL || "").match(/token=([^&]+)/)?.[1] || "";
+const APIFY_ACTOR_ID = "nwua9Gu5YrADL7ZDj"; // compass/crawler-google-places
+
+async function runApifyActor(niche, location) {
+  if (!APIFY_TOKEN) throw new Error("APIFY_TOKEN not configured");
+
+  // 1. Start run
+  const runResp = await axios.post(
+    `https://api.apify.com/v2/acts/${APIFY_ACTOR_ID}/runs?token=${APIFY_TOKEN}`,
+    {
+      searchStringsArray:         [`${niche} in ${location}`],
+      locationQuery:              location,
+      maxCrawledPlacesPerSearch:  50,
+      language:                   "en",
+      includeWebResults:          false,
+      skipClosedPlaces:           false,
+    },
+    { timeout: 15000 }
+  );
+  const runId    = runResp.data?.data?.id;
+  const datasetId = runResp.data?.data?.defaultDatasetId;
+  if (!runId) throw new Error("Apify run did not return a run ID");
+  console.log(`  [Apify] Run started: ${runId}`);
+
+  // 2. Poll until SUCCEEDED (max 3 min, every 5 s)
+  const deadline = Date.now() + 3 * 60 * 1000;
+  let status = runResp.data?.data?.status;
+  while (status !== "SUCCEEDED" && Date.now() < deadline) {
+    if (status === "FAILED" || status === "ABORTED" || status === "TIMED-OUT")
+      throw new Error(`Apify run ${status}`);
+    await new Promise((r) => setTimeout(r, 5000));
+    const poll = await axios.get(
+      `https://api.apify.com/v2/actor-runs/${runId}?token=${APIFY_TOKEN}`,
+      { timeout: 10000 }
+    );
+    status = poll.data?.data?.status;
+    console.log(`  [Apify] Run status: ${status}`);
+  }
+  if (status !== "SUCCEEDED") throw new Error("Apify run timed out");
+
+  // 3. Fetch results from the new dataset
+  const itemsResp = await axios.get(
+    `https://api.apify.com/v2/datasets/${datasetId}/items?token=${APIFY_TOKEN}&clean=true`,
+    { timeout: 15000 }
+  );
+  const items = Array.isArray(itemsResp.data) ? itemsResp.data : [];
+  console.log(`  [Apify] Fetched ${items.length} fresh items from dataset ${datasetId}`);
+  return items;
+}
+
 // ── Search route (both /search and /api/search) ──────────────────
 
 app.post(["/search", "/api/search"], async (req, res) => {
@@ -1199,6 +1252,25 @@ app.post(["/search", "/api/search"], async (req, res) => {
       }
       return unique;
     };
+
+    // ── 0. PRIMARY: Apify Google Places actor (fresh run each request) ─
+    console.log("  [Pipeline] Stage 0: Triggering Apify actor run...");
+    try {
+      const apifyLeads = await runApifyActor(niche, location);
+      if (apifyLeads.length > 0) {
+        const mapped = apifyLeads.map((b) => ({
+          name:    b.title   || b.name || "",
+          phone:   b.phone   || null,
+          website: b.website || null,
+          address: [b.street, b.city, b.state].filter(Boolean).join(", ") || null,
+          emails:  [],
+        }));
+        allSources = addUnique(mapped);
+        console.log(`  [Pipeline] Apify returned: ${allSources.length} leads`);
+      }
+    } catch (err) {
+      console.log(`  [Pipeline] Apify failed (non-fatal): ${err.message}`);
+    }
 
     // ── 1. PRIMARY: Puppeteer Google Maps scraper ─────────────────────
     console.log("  [Pipeline] Stage 1: Running Puppeteer scraper...");
