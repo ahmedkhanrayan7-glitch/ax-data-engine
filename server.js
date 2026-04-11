@@ -1,10 +1,17 @@
+const path = require("path");
+require("dotenv").config({ path: path.resolve(__dirname, ".env.local") });
+console.log("[ENV PATH]", path.resolve(__dirname, ".env.local"));
+console.log("[ENV CHECK]", process.env.APIFY_DATASET_URL ? "FOUND" : "MISSING");
+
+// DEBUG OVERRIDE — remove after confirming scraper works
+process.env.APIFY_DATASET_URL = "TEST_WORKING";
+console.log("[ENV TEST]", process.env.APIFY_DATASET_URL);
+
 const express = require("express");
 const session = require("express-session");
 const cors    = require("cors");
 const axios   = require("axios");
 const cheerio = require("cheerio");
-const fs      = require("fs");
-const path    = require("path");
 // Puppeteer Google Maps scraper (with email extraction) — optional, fails gracefully
 let scrapeGoogleMapsWithEmails;
 try {
@@ -45,25 +52,11 @@ app.use(session({
 // CONFIG
 // ─────────────────────────────────────────────────────────────────
 
-// Load .env.local without requiring dotenv as a dependency
-(function loadEnvLocal() {
-  const envPath = path.join(__dirname, ".env.local");
-  try {
-    const lines = fs.readFileSync(envPath, "utf8").split("\n");
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#")) continue;
-      const eqIdx = trimmed.indexOf("=");
-      if (eqIdx < 1) continue;
-      const key = trimmed.slice(0, eqIdx).trim();
-      const val = trimmed.slice(eqIdx + 1).trim().replace(/^["']|["']$/g, "");
-      if (key && !process.env[key]) process.env[key] = val; // system env wins
-    }
-    console.log("  Loaded .env.local");
-  } catch {
-    // file absent — use system environment only
-  }
-})();
+if (!process.env.APIFY_DATASET_URL || process.env.APIFY_DATASET_URL.includes("YOUR_") || process.env.APIFY_DATASET_URL.includes("PASTE_")) {
+  console.error("❌ APIFY_DATASET_URL is not configured properly.");
+  console.log("👉 Please paste your real dataset URL inside .env.local");
+}
+console.log("[ENV STATUS]", process.env.APIFY_DATASET_URL ? "READY" : "MISSING");
 
 const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY || null;
 
@@ -787,7 +780,10 @@ const SEEDS = {
 function getSeedLeads(niche) {
   const lower = niche.toLowerCase();
   const key = Object.keys(SEEDS).find((k) => k !== "default" && lower.includes(k)) || "default";
-  return SEEDS[key].map((b) => ({ ...b, address: null }));
+  const isEnglish = (text) => /^[\x00-\x7F]+$/.test(text || "");
+  return SEEDS[key]
+    .filter((b) => isEnglish(b.name))
+    .map((b) => ({ ...b, address: null }));
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -1252,6 +1248,14 @@ app.post(["/search", "/api/search"], async (req, res) => {
       allSources = [...allSources, ...uniqueSeeds];
       console.log(`  [Pipeline] Seeds added: ${uniqueSeeds.length}`);
     }
+
+    // ── Filter non-English names before enrichment ──────────────────
+    const isEnglish = (text) => /^[\x00-\x7F]+$/.test(text || "");
+    allSources = allSources.filter((b) => isEnglish(b.name));
+    console.log(`  [Pipeline] After English filter: ${allSources.length}`);
+
+    // Shuffle so repeated runs enrich different leads
+    allSources.sort(() => 0.5 - Math.random());
 
     console.log(`  [Pipeline] Total candidates after all stages: ${allSources.length}`);
 
