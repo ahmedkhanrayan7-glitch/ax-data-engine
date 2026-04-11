@@ -1,6 +1,7 @@
 const path = require("path");
-require("dotenv").config({ path: path.resolve(__dirname, ".env.local") });
+
 console.log("[ENV CHECK]", {
+  PORT:              process.env.PORT              || "MISSING",
   APIFY_DATASET_URL: process.env.APIFY_DATASET_URL ? "FOUND" : "MISSING",
 });
 
